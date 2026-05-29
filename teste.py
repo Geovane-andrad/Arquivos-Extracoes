@@ -1,152 +1,63 @@
-"""
-importar_cnpj_agenda.py
-------------------------
-Importa a lista de CNPJs cadastrados para consulta de agenda B3
-do SharePoint para extract.tb_ex_cnpj_agenda no RDS,
-depois chama a procedure que consolida QProft + Movingpay + SharePoint
-e faz UPSERT em sharepoint.tb_dm_cnpj.
-
-Fonte  : SharePoint > TimereaCarto > CNPJ_cadastrado_para_consulta_de_agenda
-         > CNPJ_CADASTRADO_PARA_CONSULTA_DE_AGENDA.xlsx
-Destino: sharepoint.tb_dm_cnpj (via procedure sp_merge_cnpj_agenda)
-
-Variáveis no .env:
-    ID_DIRETORIO    Tenant ID Azure
-    ID_APLICATIVO   Client ID App Registration
-    ID_SECRET_KEY   Client Secret
-"""
-
-import os
-import re
-import uuid
 import requests
 import pandas as pd
-import sys_conexaoBanco as cnx
-import sys_funcoesBanco as fnc
-from psycopg2.extras import execute_values
-from pathlib import Path
-from dotenv import load_dotenv
-from datetime import datetime
-from io import BytesIO
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+def extrair_antecipacoes():
 
-# ── Credenciais SharePoint ────────────────────────────────────────────────────
-TENANT_ID     = os.getenv("ID_DIRETORIO")
-CLIENT_ID     = os.getenv("ID_APLICATIVO")
-CLIENT_SECRET = os.getenv("ID_SECRET_KEY")
-DRIVE_ID      = "b!HUuCPqZunUyTm3k2ZsjfNKCUjVqKpnJKnkjWrtjcYkmncmF44obKT5_N7CMMFJQ1"
-ARQUIVO_PATH  = "CNPJ_cadastrado_para_consulta_de_agenda/CNPJ_CADASTRADO_PARA_CONSULTA_DE_AGENDA.xlsx"
+    url = "https://api.movingpay.com.br/api/v3/relatorios/antecipacoes"
 
-GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-TOKEN_URL  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    chave = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE2NTMsImN1c3RvbWVyc19pZCI6ODIsImhhc2giOiJlMGM3MzFiZC1jMjBiLTRkZDEtYjNmNC0zY2ZlYTg5YmVmMDciLCJpYXQiOjE3NzgwMDQ5OTcsImV4cCI6MTc4NTc4MDk5N30.u6oWs5J_Se1UcMahZ1ODkQiD6-wjYU_NYOeCp0KgKjg"
 
+    headers = {
+        "CUSTOMER": str(82),
+        "Authorization": f"Bearer {chave}",
+        "Content-Type": "application/json"
+    }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CAMADA 1 — SHAREPOINT: autenticação e download
-# ══════════════════════════════════════════════════════════════════════════════
+    params = {
+        "start_date": "2026-04-08 00:00:00",
+        "finish_date": "2026-04-12 23:59:59",
+        "filter_date_by": "updated_date",
+        "page": 1
+    }
 
-def get_access_token() -> str:
-    resp = requests.post(TOKEN_URL, data={
-        "grant_type":    "client_credentials",
-        "client_id":     CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "scope":         "https://graph.microsoft.com/.default",
-    })
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    todas_paginas = []
 
+    while True:
+        response = requests.get(url, headers=headers, params=params)
 
-def baixar_excel(token: str) -> bytes:
-    arquivo_encoded = ARQUIVO_PATH.replace(" ", "%20")
-    url  = f"{GRAPH_BASE}/drives/{DRIVE_ID}/root:/{arquivo_encoded}:/content"
-    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
-    resp.raise_for_status()
-    return resp.content
+        if response.status_code != 200:
+            print("Erro:", response.status_code)
+            print(response.text)
+            return
 
+        dados = response.json()
+        registros = dados.get("data", [])
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CAMADA 2 — EXTRACT: Excel → DataFrame
-# ══════════════════════════════════════════════════════════════════════════════
+        if not registros:
+            break
 
-def limpar_cnpj(valor) -> str | None:
-    if valor is None or str(valor).strip() == '':
-        return None
-    return re.sub(r'[^0-9]', '', str(valor)) or None
+        todas_paginas.extend(registros)
 
+        last_page = dados.get("lastPage", 1)
 
-def extrair_cnpjs(conteudo: bytes, dt_carga: datetime) -> pd.DataFrame:
-    df = pd.read_excel(BytesIO(conteudo), dtype=str, usecols=["cd_cnpj", "nm_empresa"])
+        print(f"Página {params['page']} de {last_page}")
 
-    df["cd_cnpj"]    = df["cd_cnpj"].apply(limpar_cnpj)
-    df["nm_empresa"]  = df["nm_empresa"].str.strip().str.upper()
+        if params["page"] >= last_page:
+            break
 
-    # Remove null bytes (\x00) e caracteres de controle (U+0080–U+009F)
-    # que causam erro de encoding no driver ODBC ANSI (SQLSTATE 22P05)
-    df["nm_empresa"] = df["nm_empresa"].str.replace(r'[\x00-\x1f\x7f-\x9f]', '', regex=True)
-    df["cd_cnpj"]    = df["cd_cnpj"].str.replace(r'[\x00-\x1f\x7f-\x9f]', '', regex=True)
+        params["page"] += 1
 
-    df["id_registro"] = [str(uuid.uuid4()) for _ in range(len(df))]
-    df["dt_carga"]    = dt_carga
+    df = pd.DataFrame(todas_paginas)
 
-    # Remove linhas sem CNPJ
-    df = df[df["cd_cnpj"].notna()].reset_index(drop=True)
+    if df.empty:
+        print("Nenhum dado encontrado.")
+        return
 
-    return df[["id_registro", "cd_cnpj", "nm_empresa", "dt_carga"]]
+    # 👉 SEM FILTRO (traz tudo)
+    nome_arquivo = "antecipacoes_2026_04_01_a_20.xlsx"
+    df.to_excel(nome_arquivo, index=False)
+
+    print(f"Arquivo gerado: {nome_arquivo}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CAMADA 3 — LOAD: DataFrame → extract.tb_ex_cnpj_agenda
-# ══════════════════════════════════════════════════════════════════════════════
-
-def carregar(df: pd.DataFrame):
-    cols     = list(df.columns)
-    valores  = [tuple(row) for row in df.itertuples(index=False, name=None)]
-    cols_str = ", ".join(f'"{c}"' for c in cols)
-    sql      = f'INSERT INTO extract.tb_ex_cnpj_agenda ({cols_str}) VALUES %s'
-    cursor   = cnx.conn.cursor()
-    execute_values(cursor, sql, valores)
-    cursor.close()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ORQUESTRADOR
-# ══════════════════════════════════════════════════════════════════════════════
-
-def executar_etl():
-    print("=" * 55)
-    print("🚀 ETL — CNPJ Cadastrado para Consulta de Agenda")
-    print("=" * 55)
-
-    print("\n🔐 Autenticando no SharePoint...")
-    token = get_access_token()
-
-    print("⬇️  Baixando CNPJ_CADASTRADO_PARA_CONSULTA_DE_AGENDA.xlsx...")
-    conteudo = baixar_excel(token)
-
-    dt_carga = datetime.now()
-    df = extrair_cnpjs(conteudo, dt_carga)
-
-    print(f"📋 {len(df)} CNPJs encontrados após limpeza\n")
-
-
-    try:
-        carregar(df)
-        cnx.conn.commit()
-        print(f"\n✅ extract.tb_ex_cnpj_agenda: {len(df)} registros inseridos")
-
-        print("\n⚙️  Executando sp_merge_cnpj_agenda...")
-        fnc.run_procedure("extract.sp_merge_cnpj_agenda()")
-        print("✅ Merge concluído — dados disponíveis em sharepoint.tb_dm_cnpj")
-
-    except Exception as e:
-        cnx.conn.rollback()
-        print(f"\n❌ Erro na carga: {e}")
-        raise
-
-    print("=" * 55)
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    executar_etl()
+extrair_antecipacoes()

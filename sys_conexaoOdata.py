@@ -23,11 +23,7 @@ def get_dadosOdata_old(parametro):
 
 def get_dados_mvp(url, parametro):
     
-    ## retirado dia 07/08/2025
-    ## chave = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjI0ODcsImN1c3RvbWVyc19pZCI6IjgyIiwiaGFzaCI6ImMwNTFmMTE2LTRhMjAtNDhlYS1iMGZmLTBhYjQ5NGZjNzlkZSIsImlhdCI6MTY4MjQ1MTcxNSwiZXhwIjozMTcyMjY4OTQxMTV9.aGFc9j6DmCzolqphoJjfB0GCUSQzWl9ytzwFD7YQo-c"
- 
-    ## nova key 07/08/2025
-    chave = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE2NTMsImN1c3RvbWVyc19pZCI6IjgyIiwiaGFzaCI6IjQwZDJlYzIzLTg0OGYtNDNkZS05YTdjLThkNmFkOWM3MTI3MSIsImlhdCI6MTc1NDQxNjc0MSwiZXhwIjoxNzYyMTkyNzQxfQ.8Wvpz0aVrekqwbqm8BCDHbJjG_Mc0CIz4cBA-PJXjEM"
+    chave = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE2NTMsImN1c3RvbWVyc19pZCI6ODIsImhhc2giOiJlMGM3MzFiZC1jMjBiLTRkZDEtYjNmNC0zY2ZlYTg5YmVmMDciLCJpYXQiOjE3NzgwMDQ5OTcsImV4cCI6MTc4NTc4MDk5N30.u6oWs5J_Se1UcMahZ1ODkQiD6-wjYU_NYOeCp0KgKjg"
 
     # Cabeçalho e parâmetros
     cabecalho = {
@@ -73,3 +69,72 @@ def get_dadosOdata_serasa(parametro):
 
     df = pd.json_normalize(conteudo['value'])
     return df
+
+
+#--------------------------------------------------------------- Novos -------------------------------------------------------------#
+
+
+def get_token_mvp():
+    import requests
+
+    token_url = "https://sso.movingpay.com.br/realms/prd-movingpay/protocol/openid-connect/token"
+
+    payload = {
+        "grant_type": "client_credentials",
+        "client_id": "b2b-28533398000140-owner",
+        "client_secret": "D5s2hERIOloJpQQDNNXO7a1uVLyJrAHT"
+    }
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    cert_path = r"C:\Certificado mTLS\certificate-prod (1).pem"
+
+    response = requests.post(
+        token_url,
+        data=payload,
+        headers=headers,
+        cert=cert_path  # 👈 AQUI está o ponto crítico
+    )
+
+    print(f"client_id: '{payload['client_id']}'")
+
+    if response.status_code != 200:
+        print(f"Erro ao obter token: {response.status_code}")
+        print(response.text)
+        return None
+
+    token = response.json().get("access_token")
+
+    if token:
+        print("✔️ Token obtido com sucesso.")
+        return token
+    else:
+        print("❌ Não foi possível extrair o token.")
+        return None
+
+
+def get_dados_mvp(url, parametro):
+    import requests
+
+    token = get_token_mvp()
+
+    if not token:
+        raise Exception("Erro ao obter token")
+
+    cert_path = r"C:\Certificado mTLS\certificate-prod (1).pem"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params=parametro,
+        cert=cert_path
+    )
+
+    return response
